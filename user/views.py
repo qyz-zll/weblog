@@ -5,7 +5,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ErrorDetail
 
-from . import models
+from . import models, serializers
 from .serializers import LoginSerializer, RegisterSerializer, UserInfoSerializer, FriendListSerializer, \
     ChatMessageSerializer, SendMessageSerializer, MarkAsReadSerializer
 # 导入统一响应函数
@@ -23,7 +23,8 @@ from rest_framework import status, generics
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from .serializers import AvatarUploadSerializer
-from .models import User, Friend, ChatMessage  # 你的自定义用户模型
+from .models import User, Friend, ChatMessage, FriendSerializer, HandleFriendRequestSerializer, \
+    FriendRequestSerializer, SendFriendRequestSerializer  # 你的自定义用户模型
 import os
 from django.conf import settings
 import logging
@@ -212,45 +213,40 @@ class UpdateUserInfoView(APIView):
 
 
 class FriendListView(generics.ListAPIView):
-    """获取好友列表接口"""
+    """获取我的好友列表（已通过的双向好友）"""
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
-    serializer_class = FriendListSerializer
+    serializer_class = FriendSerializer
 
     def get_queryset(self):
+        current_user = self.request.user
+        # 双向查询：我加别人且通过 / 别人加我且通过（原逻辑不变）
         return Friend.objects.filter(
-            user=self.request.user, is_approved=True
-        )
+            models.Q(user=current_user, is_approved=True) |
+            models.Q(friend=current_user, is_approved=True)
+        ).order_by("-created_at")
 
+    # 重写 list 方法：自定义返回格式（带 code 状态码）
     def list(self, request, *args, **kwargs):
-        try:
-            queryset = self.get_queryset()
-            # 传递request到序列化器context（必须！）
-            serializer = self.get_serializer(queryset, many=True, context={"request": request})
+        queryset = self.get_queryset()  # 获取查询集（好友数据）
+        serializer = self.get_serializer(queryset, many=True)  # 序列化数据
 
-            # 格式化响应（适配前端）
-            friend_list = [item["friend_info"] for item in serializer.data]
-            for i, item in enumerate(serializer.data):
-                friend_list[i].update({
-                    "last_message": item["last_message"],
-                    "last_message_time": item["last_message_time"],
-                    "unread_count": item["unread_count"]
-                })
+        # 构造统一响应格式：code=200（成功）+ message + data（好友列表数组）
+        response_data = {
+            "code": status.HTTP_200_OK,  # 200 表示成功（与 HTTP 状态码一致）
+            "message": "好友列表获取成功" if queryset.exists() else "暂无好友",
+            "data": serializer.data  # 好友数据数组（空数组/有数据数组）
+        }
 
-            logger.info(f"好友列表响应数据：{friend_list}")
-            return Response(friend_list, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"好友列表接口异常：{str(e)}", exc_info=True)
-            return Response(
-                {"detail": f"获取好友列表失败：{str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        # 返回自定义响应（HTTP 状态码仍为 200 OK）
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 class ChatMessageView(generics.ListAPIView):
     """获取聊天记录接口"""
     permission_classes = [IsAuthenticated]
     serializer_class = ChatMessageSerializer
-
+    authentication_classes = [JWTAuthentication]
     def get_queryset(self):
         friend_id = self.kwargs.get("friend_id")
         current_user = self.request.user
@@ -271,7 +267,7 @@ class SendMessageView(generics.CreateAPIView):
     """发送消息接口"""
     permission_classes = [IsAuthenticated]
     serializer_class = SendMessageSerializer
-
+    authentication_classes = [JWTAuthentication]
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -332,3 +328,127 @@ class UnreadCountView(generics.RetrieveAPIView):
             receiver=request.user, is_read=False
         ).count()
         return Response({"total_unread": total_unread})
+
+
+# 新增导入（文件顶部）
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.permissions import IsAuthenticated
+import django.db.models as models
+from django.utils import timezone
+
+
+# ---------------------- 好友申请相关视图 ----------------------
+class SendFriendRequestView(generics.CreateAPIView):
+    """发送好友申请（POST）"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+    serializer_class = SendFriendRequestSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        friend_id = serializer.validated_data["friend_id"]
+        friend = User.objects.get(id=friend_id)
+
+        # 创建好友申请（待审核）
+        Friend.objects.create(
+            user=request.user,
+            friend=friend,
+            is_approved=False
+        )
+
+        return Response(
+            {"message": "好友申请发送成功，等待对方审核"},
+            status=status.HTTP_201_CREATED
+        )
+
+
+class MyFriendRequestsView(generics.ListAPIView):
+    """获取我收到的好友申请（GET）"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+    serializer_class = FriendRequestSerializer
+
+    def get_queryset(self):
+        # 查询当前用户作为被申请人，且未通过的申请（按申请时间倒序）
+        return Friend.objects.filter(
+            friend=self.request.user,
+            is_approved=False
+        ).order_by("-created_at")
+
+
+class HandleFriendRequestView(generics.CreateAPIView):
+    """处理好友申请（同意/拒绝）（POST）"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+    serializer_class = HandleFriendRequestSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        request_id = serializer.validated_data["request_id"]
+        agree = serializer.validated_data["agree"]
+
+        friend_request = Friend.objects.get(id=request_id, friend=request.user)
+
+        if agree:
+            # 同意：更新为已通过
+            friend_request.is_approved = True
+            friend_request.save()
+            return Response({"message": "已同意好友申请，现在可以聊天啦！"})
+        else:
+            # 拒绝：删除申请记录
+            friend_request.delete()
+            return Response({"message": "已拒绝好友申请"})
+
+
+class CancelFriendRequestView(generics.DestroyAPIView):
+    """取消我发送的好友申请（DELETE）"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        # 获取当前用户发送的、未通过的申请
+        try:
+            return Friend.objects.get(
+                user=self.request.user,
+                friend_id=self.kwargs.get("friend_id"),
+                is_approved=False
+            )
+        except Friend.DoesNotExist:
+            raise serializers.ValidationError("申请不存在或已处理")
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance.delete()
+        return Response({"message": "好友申请已取消"}, status=status.HTTP_204_NO_CONTENT)
+
+
+class DeleteFriendView(generics.DestroyAPIView):
+    """删除好友（双向删除，DELETE）"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        # 查询当前用户与目标用户的已通过好友关系（双向匹配）
+        friend_id = self.kwargs.get("friend_id")
+        try:
+            return Friend.objects.get(
+                models.Q(user=self.request.user, friend_id=friend_id, is_approved=True) |
+                models.Q(friend=self.request.user, user_id=friend_id, is_approved=True)
+            )
+        except Friend.DoesNotExist:
+            raise serializers.ValidationError("好友关系不存在")
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance.delete()
+        return Response({"message": "已成功删除好友"}, status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------- 修正原有好友列表视图（支持双向好友） ----------------------
