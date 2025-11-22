@@ -15,12 +15,11 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-
 from django.urls import path
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-
+from django.urls import path, include
 from user import views
-from user.views import UserInfoView, UpdateUserInfoView
+from user.views import UserInfoView, UpdateUserInfoView, FriendListView, ChatMessageView, SendMessageView,MarkAsReadView, UnreadCountView
 from django.conf import settings
 from django.conf.urls.static import static
 from user.views import AvatarUploadView
@@ -36,6 +35,7 @@ urlpatterns = [
     # path('', include('user.urls')),  # 假设用户相关接口在user app下
     path('upload-avatar/', AvatarUploadView.as_view(), name='upload-avatar'),  # 头像上传接口
     path('UpdateUserInfo/',UpdateUserInfoView.as_view(), name='UpdateUserInfo'),#修改用户信息
+    path("", include("user.urls")),
 ]
 # # 容许直接访问资源
 if settings.DEBUG:

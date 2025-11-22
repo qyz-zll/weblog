@@ -4,7 +4,10 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ErrorDetail
-from .serializers import LoginSerializer, RegisterSerializer, UserInfoSerializer
+
+from . import models
+from .serializers import LoginSerializer, RegisterSerializer, UserInfoSerializer, FriendListSerializer, \
+    ChatMessageSerializer, SendMessageSerializer, MarkAsReadSerializer
 # 导入统一响应函数
 from utils.response import success_response, error_response
 from rest_framework.views import APIView
@@ -16,14 +19,16 @@ from .serializers import UserInfoSerializer, UserInfoUpdateSerializer  # 导入�
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, generics
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from .serializers import AvatarUploadSerializer
-from .models import User  # 你的自定义用户模型
+from .models import User, Friend, ChatMessage  # 你的自定义用户模型
 import os
 from django.conf import settings
-
+import logging
+# 配置日志（方便调试）
+logger = logging.getLogger(__name__)
 class LoginView(APIView):
     permission_classes = []  # 允许匿名访问
 
@@ -204,3 +209,126 @@ class UpdateUserInfoView(APIView):
             'message': '更新失败',
             'errors': serializer.errors  # 返回具体错误信息，方便前端显示
         }, status=HTTP_400_BAD_REQUEST)
+
+
+class FriendListView(generics.ListAPIView):
+    """获取好友列表接口"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = FriendListSerializer
+
+    def get_queryset(self):
+        return Friend.objects.filter(
+            user=self.request.user, is_approved=True
+        )
+
+    def list(self, request, *args, **kwargs):
+        try:
+            queryset = self.get_queryset()
+            # 传递request到序列化器context（必须！）
+            serializer = self.get_serializer(queryset, many=True, context={"request": request})
+
+            # 格式化响应（适配前端）
+            friend_list = [item["friend_info"] for item in serializer.data]
+            for i, item in enumerate(serializer.data):
+                friend_list[i].update({
+                    "last_message": item["last_message"],
+                    "last_message_time": item["last_message_time"],
+                    "unread_count": item["unread_count"]
+                })
+
+            logger.info(f"好友列表响应数据：{friend_list}")
+            return Response(friend_list, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"好友列表接口异常：{str(e)}", exc_info=True)
+            return Response(
+                {"detail": f"获取好友列表失败：{str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class ChatMessageView(generics.ListAPIView):
+    """获取聊天记录接口"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = ChatMessageSerializer
+
+    def get_queryset(self):
+        friend_id = self.kwargs.get("friend_id")
+        current_user = self.request.user
+        # 验证好友关系
+        is_friend = Friend.objects.filter(
+            user=current_user, friend_id=friend_id, is_approved=True
+        ).exists()
+        if not is_friend:
+            return ChatMessage.objects.none()
+        # 获取双方聊天记录
+        return ChatMessage.objects.filter(
+            (models.Q(sender=current_user, receiver_id=friend_id) |
+             models.Q(sender_id=friend_id, receiver=current_user))
+        ).order_by("send_time")
+
+
+class SendMessageView(generics.CreateAPIView):
+    """发送消息接口"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = SendMessageSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        friend_id = serializer.validated_data["friend_id"]
+        content = serializer.validated_data["content"]
+        current_user = request.user
+
+        try:
+            friend = Friend.objects.get(
+                user=current_user, friend_id=friend_id, is_approved=True
+            )
+        except Friend.DoesNotExist:
+            return Response(
+                {"message": "不是好友，无法发送消息"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        chat_message = ChatMessage.objects.create(
+            sender=current_user,
+            receiver=friend.friend,
+            content=content
+        )
+
+        return Response(
+            ChatMessageSerializer(chat_message).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class MarkAsReadView(generics.CreateAPIView):
+    """标记消息为已读接口"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = MarkAsReadSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        friend_id = serializer.validated_data["friend_id"]
+        current_user = request.user
+
+        ChatMessage.objects.filter(
+            sender_id=friend_id,
+            receiver=current_user,
+            is_read=False
+        ).update(is_read=True)
+
+        return Response({"message": "标记已读成功"})
+
+
+class UnreadCountView(generics.RetrieveAPIView):
+    """获取未读消息总数接口"""
+    permission_classes = [IsAuthenticated]
+
+    def retrieve(self, request, *args, **kwargs):
+        total_unread = ChatMessage.objects.filter(
+            receiver=request.user, is_read=False
+        ).count()
+        return Response({"total_unread": total_unread})

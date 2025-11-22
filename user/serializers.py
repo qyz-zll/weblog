@@ -1,12 +1,14 @@
 import os
 import re
+from time import timezone
 
 from django.db import transaction
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 from weblog import settings
-from .models import User  # 仅导入自定义 User 主模型（删除内置 User 导入）
+from .models import User, Friend, ChatMessage
+import django.db.models as models  # 补充导入models，避免Q对象报错
 
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField(required=True, label="用户名")
@@ -173,3 +175,101 @@ class AvatarUploadSerializer(serializers.ModelSerializer):
         if value.size > settings.MAX_UPLOAD_SIZE:
             raise serializers.ValidationError(f'图片大小不能超过 {settings.MAX_UPLOAD_SIZE // 1024 // 1024}MB')
         return value
+
+
+class UserBasicSerializer(serializers.ModelSerializer):
+    """用户基础信息序列化器（用于好友列表）- 修正：直接使用自定义User字段，移除profile依赖"""
+    avatar = serializers.SerializerMethodField()
+    is_online = serializers.SerializerMethodField()
+    last_active_time = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "avatar", "is_online", "last_active_time"]
+
+    def get_avatar(self, obj):
+        """修正：直接读取自定义User的avatar字段，无需profile"""
+        if obj.avatar and hasattr(obj.avatar, 'url'):
+            return f"http://127.0.0.1:8000{obj.avatar.url}"
+        return "http://127.0.0.1:8000/media/avatars/default.png"
+
+    def get_is_online(self, obj):
+        """修正：使用自定义User的last_login_time字段（3分钟内活跃视为在线）"""
+        time_diff = timezone.now() - obj.last_login_time
+        return time_diff.total_seconds() < 180  # 3分钟=180秒
+
+    def get_last_active_time(self, obj):
+        """修正：直接读取自定义User的last_login_time字段"""
+        return obj.last_login_time.strftime("%Y-%m-%d %H:%M:%S") if obj.last_login_time else "暂无"
+
+class FriendListSerializer(serializers.ModelSerializer):
+    """好友列表序列化器 - 修正：依赖修正后的UserBasicSerializer"""
+    friend_info = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+    last_message_time = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Friend
+        fields = ["friend_info", "last_message", "last_message_time", "unread_count"]
+
+    def get_friend_info(self, obj):
+        """返回修正后的好友基础信息"""
+        return UserBasicSerializer(obj.friend).data
+
+    def get_last_message(self, obj):
+        current_user = self.context["request"].user
+        last_msg = ChatMessage.objects.filter(
+            (models.Q(sender=current_user, receiver=obj.friend) |
+             models.Q(sender=obj.friend, receiver=current_user))
+        ).order_by("-send_time").first()
+        return last_msg.content if last_msg else ""
+
+    def get_last_message_time(self, obj):
+        current_user = self.context["request"].user
+        last_msg = ChatMessage.objects.filter(
+            (models.Q(sender=current_user, receiver=obj.friend) |
+             models.Q(sender=obj.friend, receiver=current_user))
+        ).order_by("-send_time").first()
+        return last_msg.send_time.strftime("%Y-%m-%d %H:%M:%S") if last_msg else ""
+
+    def get_unread_count(self, obj):
+        current_user = self.context["request"].user
+        return ChatMessage.objects.filter(
+            sender=obj.friend, receiver=current_user, is_read=False
+        ).count()
+
+class ChatMessageSerializer(serializers.ModelSerializer):
+    """聊天消息序列化器 - 修正：移除profile依赖，直接使用User字段"""
+    sender_avatar = serializers.SerializerMethodField()
+    receiver_avatar = serializers.SerializerMethodField()
+    send_time = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ChatMessage
+        fields = ["id", "sender", "receiver", "content", "send_time", "sender_avatar", "receiver_avatar", "is_read"]
+        read_only_fields = ["sender", "send_time", "is_read"]
+
+    def get_sender_avatar(self, obj):
+        """修正：直接读取发送者User的avatar字段"""
+        if obj.sender.avatar and hasattr(obj.sender.avatar, 'url'):
+            return f"http://127.0.0.1:8000{obj.sender.avatar.url}"
+        return "http://127.0.0.1:8000/media/avatars/default.png"
+
+    def get_receiver_avatar(self, obj):
+        """修正：直接读取接收者User的avatar字段"""
+        if obj.receiver.avatar and hasattr(obj.receiver.avatar, 'url'):
+            return f"http://127.0.0.1:8000{obj.receiver.avatar.url}"
+        return "http://127.0.0.1:8000/media/avatars/default.png"
+
+    def get_send_time(self, obj):
+        return obj.send_time.strftime("%Y-%m-%d %H:%M:%S")
+
+class SendMessageSerializer(serializers.Serializer):
+    """发送消息序列化器 - 无错误，保留"""
+    friend_id = serializers.IntegerField()
+    content = serializers.CharField(max_length=500)
+
+class MarkAsReadSerializer(serializers.Serializer):
+    """标记已读序列化器 - 无错误，保留"""
+    friend_id = serializers.IntegerField()

@@ -1,20 +1,17 @@
-# models.py（修正后）
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
+from django.utils import timezone
 
-
+# 自定义User模型（替代Django内置User）
 class User(AbstractUser):
     """
-    自定义用户模型（替代 Django 内置 User）
-    适配注册、登录、JWT 认证，扩展常用字段
+    自定义用户模型，适配注册、登录、JWT认证，扩展常用字段
     """
-    # 基础字段（继承 AbstractUser 已包含：username、password、email、is_active、is_staff 等）
-
-    # 扩展字段：头像（合并重复定义，保留一个正确配置）
+    # 扩展字段：头像
     avatar = models.ImageField(
-        upload_to='avatars/%Y/%m/%d/',  # 按年月日分文件夹存储，避免文件名冲突
-        default='avatars/default.png',  # 默认头像路径（需手动在 media/avatars 下放 default.png）
+        upload_to='avatars/%Y/%m/%d/',
+        default='avatars/default.png',
         null=True,
         blank=True,
         verbose_name=_("用户头像"),
@@ -30,44 +27,78 @@ class User(AbstractUser):
         help_text=_("一句话介绍自己，最多 500 字")
     )
 
-    # 自动记录字段：注册时间（无需前端传递，创建时自动生成）
+    # 自动记录字段：注册时间
     create_time = models.DateTimeField(
         auto_now_add=True,
         verbose_name=_("注册时间")
     )
 
-    # 自动更新字段：最后登录时间（每次登录/保存时自动更新）
+    # 自动更新字段：最后登录时间
     last_login_time = models.DateTimeField(
         auto_now=True,
         verbose_name=_("最后登录时间")
     )
 
     class Meta:
-        """模型元数据配置（Admin 后台显示 + 数据库约束）"""
-        verbose_name = _("用户")  # Admin 后台单数名称
-        verbose_name_plural = _("用户")  # Admin 后台复数名称
-        ordering = ["-create_time"]  # 默认排序：按注册时间倒序（新用户在前）
-        unique_together = [
-            ["username"],  # 用户名唯一（注册时校验重复）
-            ["email"]  # 邮箱唯一（注册时校验重复，可根据需求删除）
-        ]
+        verbose_name = _("用户")
+        verbose_name_plural = _("用户")
+        ordering = ["-create_time"]
+        unique_together = [["username"], ["email"]]
         indexes = [
-            models.Index(fields=["username"]),  # 用户名索引，提升查询效率
-            models.Index(fields=["email"]),  # 邮箱索引，提升查询效率
+            models.Index(fields=["username"]),
+            models.Index(fields=["email"]),
         ]
 
     def __str__(self):
-        """打印用户对象时显示用户名（方便调试和 Admin 后台查看）"""
         return self.username
 
     def save(self, *args, **kwargs):
-        """重写保存方法：确保密码始终加密存储（双重保障）"""
-        # 若密码未经过加密（如手动创建用户、修改密码时），自动加密
         if self.password and not self.password.startswith(('pbkdf2_sha256$', 'bcrypt$', 'argon2')):
-            self.set_password(self.password)  # Django 内置加密方法，安全可靠
+            self.set_password(self.password)
         super().save(*args, **kwargs)
 
     def get_full_name(self):
         if self.first_name and self.last_name:
             return f"{self.last_name}{self.first_name}"
         return self.username
+
+
+class Friend(models.Model):
+    """好友关系模型（双向好友）"""
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="friends"  # 关联自定义User
+    )
+    friend = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="be_friended"  # 关联自定义User
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_approved = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ("user", "friend")
+        verbose_name = "好友"
+        verbose_name_plural = "好友"
+
+    def __str__(self):
+        return f"{self.user.username} ↔ {self.friend.username}"
+
+
+class ChatMessage(models.Model):
+    """聊天消息模型"""
+    sender = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="sent_messages"  # 关联自定义User
+    )
+    receiver = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="received_messages"  # 关联自定义User
+    )
+    content = models.TextField()
+    send_time = models.DateTimeField(default=timezone.now)
+    is_read = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["send_time"]
+        verbose_name = "聊天消息"
+        verbose_name_plural = "聊天消息"
+
+    def __str__(self):
+        return f"{self.sender.username} → {self.receiver.username}: {self.content[:20]}"
