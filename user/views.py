@@ -1,33 +1,26 @@
-# user/views.py
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.views import APIView
-from rest_framework_simplejwt.authentication import JWTAuthentication
+# # user/views.py
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ErrorDetail
-
-from . import models, serializers
-from .serializers import LoginSerializer, RegisterSerializer, UserInfoSerializer, FriendListSerializer, \
+from django.db.models import Q
+from django.shortcuts import get_object_or_404 # 你的自定义User模型
+from .serializers import UserPublicSerializer  # 对应的序列化器
+from .serializers import LoginSerializer, RegisterSerializer,  \
     ChatMessageSerializer, SendMessageSerializer, MarkAsReadSerializer
-# 导入统一响应函数
+# # 导入统一响应函数
 from utils.response import success_response, error_response
-from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework.status import HTTP_200_OK, HTTP_400_BAD_REQUEST
-from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .serializers import UserInfoSerializer, UserInfoUpdateSerializer  # 导入修改后的序列化器
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status, generics
+from rest_framework import generics, serializers
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from .serializers import AvatarUploadSerializer
-from .models import User, Friend, ChatMessage, FriendSerializer, HandleFriendRequestSerializer, \
+from .models import  FriendSerializer, HandleFriendRequestSerializer, \
     FriendRequestSerializer, SendFriendRequestSerializer  # 你的自定义用户模型
-import os
-from django.conf import settings
 import logging
+from django.db import models
 # 配置日志（方便调试）
 logger = logging.getLogger(__name__)
 class LoginView(APIView):
@@ -242,26 +235,64 @@ class FriendListView(generics.ListAPIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
 
-class ChatMessageView(generics.ListAPIView):
-    """获取聊天记录接口"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = ChatMessageSerializer
-    authentication_classes = [JWTAuthentication]
-    def get_queryset(self):
-        friend_id = self.kwargs.get("friend_id")
-        current_user = self.request.user
-        # 验证好友关系
-        is_friend = Friend.objects.filter(
-            user=current_user, friend_id=friend_id, is_approved=True
-        ).exists()
-        if not is_friend:
-            return ChatMessage.objects.none()
-        # 获取双方聊天记录
-        return ChatMessage.objects.filter(
-            (models.Q(sender=current_user, receiver_id=friend_id) |
-             models.Q(sender_id=friend_id, receiver=current_user))
-        ).order_by("send_time")
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from .models import ChatMessage, Friend, User  # 导入自定义模型
+from django.utils import timezone
 
+class ChatMessageView(APIView):
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [JWTAuthentication]
+    serializer_class = FriendSerializer
+
+    # 需登录验证
+
+    def get(self, request):
+        # 1. 提取并验证 friend_id 参数
+        friend_id = request.query_params.get('friend_id')
+        if not friend_id:
+            return Response({'error': 'friend_id 为必填参数'}, status=400)
+        try:
+            friend_id = int(friend_id)
+        except ValueError:
+            return Response({'error': 'friend_id 必须为整数'}, status=400)
+
+        # 2. 验证「双向好友关系且已通过」
+        try:
+            # 条件：当前用户是申请人且好友是被申请人，或当前用户是被申请人且好友是申请人，且状态为已通过
+            friend_relation = Friend.objects.get(
+                (Q(user=request.user, friend_id=friend_id) | Q(friend=request.user, user_id=friend_id)),
+                is_approved=True
+            )
+        except Friend.DoesNotExist:
+            return Response({'error': '好友关系不存在或未通过'}, status=403)
+
+        # 3. 查询历史消息（双向：当前用户→好友 / 好友→当前用户）
+        messages = ChatMessage.objects.filter(
+            (Q(sender=request.user, receiver_id=friend_id) |  # 当前用户发好友
+             Q(sender_id=friend_id, receiver=request.user))   # 好友发当前用户
+        ).order_by('send_time')  # 按时间升序
+
+        # 4. 序列化消息
+        message_list = []
+        for msg in messages:
+            message_list.append(
+                {
+                'id': msg.id,
+                'sender_id': msg.sender.id,
+                'sender_name': msg.sender.username,
+                'receiver_id': msg.receiver.id,
+                'content': msg.content,
+                'send_time': msg.send_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'is_read': msg.is_read
+            })
+
+        return Response({
+            "code": 200,  # 成功标识
+            "message": "获取历史消息成功",
+            "data": message_list  # 消息列表数据
+        })
 
 class SendMessageView(generics.CreateAPIView):
     """发送消息接口"""
@@ -329,15 +360,11 @@ class UnreadCountView(generics.RetrieveAPIView):
         ).count()
         return Response({"total_unread": total_unread})
 
-
-# 新增导入（文件顶部）
-from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
-import django.db.models as models
-from django.utils import timezone
+
 
 
 # ---------------------- 好友申请相关视图 ----------------------
@@ -450,24 +477,40 @@ class DeleteFriendView(generics.DestroyAPIView):
         instance.delete()
         return Response({"message": "已成功删除好友"}, status=status.HTTP_204_NO_CONTENT)
 
-
-from rest_framework import generics
-from rest_framework.permissions import IsAuthenticated  # 可选：要求登录才能查询
-from .models import User
-from .serializers import UserPublicSerializer
-
-
 class UserPublicDetailView(generics.RetrieveAPIView):
     """
-    按ID查询用户公开信息（仅返回id、username、avatar，无敏感数据）
+    按ID查询用户公开信息（仅返回id、username、avatar）
     - 路径参数：id（好友ID）
-    - 认证：可选登录认证（避免匿名访问）
-    - 数据：仅返回公开字段
+    - 认证：需登录（JWT）
+    - 统一返回格式：code+message+data
     """
-    # 可选：要求登录才能查询（删除则公开访问）
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
-
-    queryset = User.objects.all()  # 查询所有用户（但通过序列化器限制字段）
     serializer_class = UserPublicSerializer
-    lookup_field = 'id'  # 按路径参数「id」查询（而非当前用户ID）
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        # 仅查询公开信息，无需额外过滤（序列化器已限制字段）
+        return User.objects.all()
+
+    def retrieve(self, request, *args, **kwargs):
+        """重写retrieve方法，定制标准化响应"""
+        try:
+            # 获取路径参数中的好友ID，查询用户（不存在则抛404）
+            user = get_object_or_404(User, id=kwargs[self.lookup_field])
+            # 序列化数据（仅返回id、username、avatar）
+            serializer = self.get_serializer(user)
+            # 返回成功响应（code=200）
+            return Response({
+                "code": 200,
+                "message": "查询用户公开信息成功",
+                "data": serializer.data  # 公开信息：id、username、avatar
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            # 异常兜底（如用户不存在、数据库错误等）
+            return Response({
+                "code": 404,
+                "message": f"查询失败：{str(e)}",
+                "data": None
+            }, status=status.HTTP_404_NOT_FOUND)
+
