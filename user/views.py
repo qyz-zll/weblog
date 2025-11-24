@@ -451,4 +451,23 @@ class DeleteFriendView(generics.DestroyAPIView):
         return Response({"message": "已成功删除好友"}, status=status.HTTP_204_NO_CONTENT)
 
 
-# ---------------------- 修正原有好友列表视图（支持双向好友） ----------------------
+from rest_framework import generics
+from rest_framework.permissions import IsAuthenticated  # 可选：要求登录才能查询
+from .models import User
+from .serializers import UserPublicSerializer
+
+
+class UserPublicDetailView(generics.RetrieveAPIView):
+    """
+    按ID查询用户公开信息（仅返回id、username、avatar，无敏感数据）
+    - 路径参数：id（好友ID）
+    - 认证：可选登录认证（避免匿名访问）
+    - 数据：仅返回公开字段
+    """
+    # 可选：要求登录才能查询（删除则公开访问）
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    queryset = User.objects.all()  # 查询所有用户（但通过序列化器限制字段）
+    serializer_class = UserPublicSerializer
+    lookup_field = 'id'  # 按路径参数「id」查询（而非当前用户ID）

@@ -273,3 +273,13 @@ class SendMessageSerializer(serializers.Serializer):
 class MarkAsReadSerializer(serializers.Serializer):
     """标记已读序列化器 - 无错误，保留"""
     friend_id = serializers.IntegerField()
+
+from rest_framework import serializers
+from .models import User
+
+class UserPublicSerializer(serializers.ModelSerializer):
+    """仅返回公开字段：id、username、avatar（适配好友信息查询）"""
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'avatar']  # 严格控制返回字段
+        read_only_fields = fields  # 所有字段只读，避免修改

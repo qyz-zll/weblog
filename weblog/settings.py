@@ -31,6 +31,7 @@ ALLOWED_HOSTS = []
 # Application definition
 
 INSTALLED_APPS = [
+    'channels',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -143,7 +144,15 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+ASGI_APPLICATION = 'weblog.asgi.application'
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            "hosts": [('127.0.0.1', 6379)],  # Redis 默认地址和端口
+        },
+    },
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -206,19 +215,11 @@ AUTH_USER_MODEL = 'user.User'
 # weblog/settings.py（末尾添加）
 # 强制验证 DRF 配置是否被正确加载
 from rest_framework.settings import api_settings
-# 打印配置（启动服务器时会在命令行输出，用于验证）
-# print("="*50)
-# print("DRF 全局配置加载结果：")
-# print(f"DEFAULT_RENDERER_CLASSES: {api_settings.DEFAULT_RENDERER_CLASSES}")
-# print(f"EXCEPTION_HANDLER: {api_settings.EXCEPTION_HANDLER}")
-# print(f"DEFAULT_THROTTLE_CLASSES: {api_settings.DEFAULT_THROTTLE_CLASSES}")
-# print("="*50)
 CORS_ALLOW_ALL_ORIGINS = True
 # 允许所有请求头（包括Authorization）
 CORS_ALLOW_HEADERS = ['*']
 MEDIA_URL = '/media/'  # 前端访问头像的URL前缀（如：http://xxx.com/media/avatars/123.jpg）
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')  # 本地存储路径（项目根目录/media文件夹）
-
 # 允许的图片上传格式（安全限制）
 ALLOWED_UPLOAD_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif']
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 最大5MB
