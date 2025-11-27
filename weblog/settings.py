@@ -39,7 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     "user",
-    'home',
+    'blog',
     'rest_framework',
     'corsheaders',
     'rest_framework_simplejwt',
@@ -133,7 +133,7 @@ LANGUAGE_CODE = 'zh-hans'  # 原 'en-us' 改为中文
 TIME_ZONE = 'Asia/Shanghai'
 
 # 国际化支持：保持开启（不影响时区，仅支持多语言）
-USE_I18N = True
+USE_I18N = False
 
 # 时区支持：必须开启（关键！否则 TIME_ZONE 不生效）
 USE_TZ = True  # 无需修改，保持 True 即可
