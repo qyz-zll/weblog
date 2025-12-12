@@ -11,6 +11,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 import os
 from pathlib import Path
+
+from autobahn.util import public
+
 from utils.exception_handler import  custom_exception_handler
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -40,8 +43,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     "user",
     'blog',
+    'django_celery_beat',
     'rest_framework',
-    'corsheaders',
     'rest_framework_simplejwt',
 
 
@@ -63,6 +66,7 @@ CORS_ALLOW_METHODS = [
     'PUT',
     'DELETE',
     'OPTIONS',
+    'PATCH',
 ]
 
 ROOT_URLCONF = 'weblog.urls'
@@ -223,3 +227,16 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')  # 本地存储路径（项目根�
 # 允许的图片上传格式（安全限制）
 ALLOWED_UPLOAD_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif']
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 最大5MB
+# ---------------------- Celery配置 ----------------------
+# 消息代理（Broker）：Redis
+CELERY_BROKER_URL = 'redis://127.0.0.1:6379/0'  # 0号数据库
+# 结果存储（Backend）：Redis（可选，若不需要任务结果可注释）
+CELERY_RESULT_BACKEND = 'redis://127.0.0.1:6379/1'  # 1号数据库
+# 时区
+CELERY_TIMEZONE = 'Asia/Shanghai'  # 与Django时区一致
+# 启用UTC（可选，建议与Django保持一致）
+CELERY_ENABLE_UTC = False
+
+# ---------------------- django-celery-beat配置 ----------------------
+# 启用数据库调度器（用于通过Django admin管理定时任务）
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'

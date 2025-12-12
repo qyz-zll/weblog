@@ -1,3 +1,4 @@
+import pytz
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
@@ -50,6 +51,12 @@ class User(AbstractUser):
         auto_now=True,
         verbose_name=_("最后登录时间")
     )
+    is_online = models.BooleanField(
+        default=False,
+        verbose_name="是否在线")
+    last_active = models.DateTimeField(
+        auto_now=True,
+        verbose_name="最后活跃时间")
 
     class Meta:
         verbose_name = _("用户")
@@ -115,102 +122,3 @@ class ChatMessage(models.Model):
     def __str__(self):
         return f"{self.sender.username} → {self.receiver.username}: {self.content[:20]}"
 
-# ---------------------- 好友申请相关序列化器 ----------------------
-class SendFriendRequestSerializer(serializers.Serializer):
-    """发送好友申请：仅需被申请人ID"""
-    friend_id = serializers.IntegerField(label="被申请人ID")
-
-    def validate_friend_id(self, value):
-        """验证：1. 不能添加自己 2. 不能重复申请"""
-        current_user = self.context["request"].user
-        # 不能添加自己
-        if value == current_user.id:
-            raise serializers.ValidationError("不能添加自己为好友")
-        # 检查是否已发送过申请（无论是否通过）
-        exists = Friend.objects.filter(user=current_user, friend_id=value).exists()
-        if exists:
-            raise serializers.ValidationError("已向该用户发送过好友申请，请勿重复发送")
-        # 检查被申请人是否存在
-        if not User.objects.filter(id=value).exists():
-            raise serializers.ValidationError("被申请人不存在")
-        return value
-
-class FriendRequestSerializer(serializers.ModelSerializer):
-    """好友申请列表：展示申请人信息+申请时间"""
-    applicant_info = serializers.SerializerMethodField(label="申请人信息")
-
-    class Meta:
-        model = Friend
-        fields = ["id", "applicant_info", "created_at", "is_approved"]
-        read_only_fields = fields  # 所有字段仅可读
-
-    def get_applicant_info(self, obj):
-        """返回申请人的基础信息（ID、用户名、头像）"""
-        applicant = obj.user
-        return {
-            "id": applicant.id,
-            "username": applicant.username,
-            "avatar": f"http://127.0.0.1:8000{applicant.avatar.url}" if applicant.avatar else "http://127.0.0.1:8000/media/avatars/default.png"
-        }
-
-class HandleFriendRequestSerializer(serializers.Serializer):
-    """处理好友申请：需申请ID+处理结果（同意/拒绝）"""
-    request_id = serializers.IntegerField(label="申请ID")
-    agree = serializers.BooleanField(label="是否同意（True=同意，False=拒绝）")
-
-    def validate_request_id(self, value):
-        """验证：申请是否存在，且是发给当前用户的未处理申请"""
-        current_user = self.context["request"].user
-        try:
-            friend_request = Friend.objects.get(id=value, friend=current_user, is_approved=False)
-        except Friend.DoesNotExist:
-            raise serializers.ValidationError("申请不存在或已处理")
-        return value
-
-class FriendSerializer(serializers.ModelSerializer):
-    """好友列表序列化器（双向好友）"""
-    friend_info = serializers.SerializerMethodField(label="好友信息")
-    last_message = serializers.SerializerMethodField(label="最后一条消息")
-    last_message_time = serializers.SerializerMethodField(label="最后消息时间")
-    unread_count = serializers.SerializerMethodField(label="未读消息数")
-
-    class Meta:
-        model = Friend
-        fields = ["friend_info", "last_message", "last_message_time", "unread_count"]
-
-    def get_friend_info(self, obj):
-        """返回好友信息（区分当前用户是申请人还是被申请人）"""
-        current_user = self.context["request"].user
-        friend = obj.friend if obj.user == current_user else obj.user
-        return {
-            "id": friend.id,
-            "username": friend.username,
-            "avatar": f"http://127.0.0.1:8000{friend.avatar.url}" if friend.avatar else "http://127.0.0.1:8000/media/avatars/default.png",
-            "is_online": (timezone.now() - friend.last_login_time).total_seconds() < 180,
-            "last_active_time": friend.last_login_time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-    def get_last_message(self, obj):
-        current_user = self.context["request"].user
-        friend = obj.friend if obj.user == current_user else obj.user
-        last_msg = ChatMessage.objects.filter(
-            (models.Q(sender=current_user, receiver=friend) |
-             models.Q(sender=friend, receiver=current_user))
-        ).order_by("-send_time").first()
-        return last_msg.content if last_msg else ""
-
-    def get_last_message_time(self, obj):
-        current_user = self.context["request"].user
-        friend = obj.friend if obj.user == current_user else obj.user
-        last_msg = ChatMessage.objects.filter(
-            (models.Q(sender=current_user, receiver=friend) |
-             models.Q(sender=friend, receiver=current_user))
-        ).order_by("-send_time").first()
-        return last_msg.send_time.strftime("%Y-%m-%d %H:%M:%S") if last_msg else ""
-
-    def get_unread_count(self, obj):
-        current_user = self.context["request"].user
-        friend = obj.friend if obj.user == current_user else obj.user
-        return ChatMessage.objects.filter(
-            sender=friend, receiver=current_user, is_read=False
-        ).count()

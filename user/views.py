@@ -17,9 +17,10 @@ from rest_framework import generics, serializers
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from .serializers import AvatarUploadSerializer
-from .models import  FriendSerializer, HandleFriendRequestSerializer, \
+from .serializers import  FriendSerializer, HandleFriendRequestSerializer, \
     FriendRequestSerializer, SendFriendRequestSerializer  # 你的自定义用户模型
 import logging
+from .models import User
 from django.db import models
 # 配置日志（方便调试）
 logger = logging.getLogger(__name__)
@@ -29,6 +30,9 @@ class LoginView(APIView):
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
         if serializer.is_valid():
+            user = User.objects.get(username=serializer.validated_data['user']['username'])
+            user.is_online = True  # 登录时标记为在线
+            user.save(update_fields=["is_online"])
             # 验证通过：返回统一成功格式
             return success_response(
                 data=serializer.validated_data,  # 包含 token 和 user 信息
@@ -368,32 +372,53 @@ from rest_framework.permissions import IsAuthenticated
 
 
 # ---------------------- 好友申请相关视图 ----------------------
+from rest_framework import generics, status
+from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.permissions import IsAuthenticated
+from django.contrib.auth import get_user_model
+from .models import Friend
+from .serializers import SendFriendRequestSerializer
+
+
+
 class SendFriendRequestView(generics.CreateAPIView):
-    """发送好友申请（POST）"""
+    """发送好友申请（POST）：返回统一格式 + 200状态码"""
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     serializer_class = SendFriendRequestSerializer
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
 
+        # 手动验证，不抛默认异常
+        if not serializer.is_valid():
+            # 验证失败：返回和博客列表一致的格式（code=400）
+            error_data = serializer.errors
+            return Response({
+                "code": 400,
+                "message": error_data.get("non_field_errors") or error_data["friend_id"]["message"],
+                "data": {"friend_id": request.data.get("friend_id")}
+            }, status=status.HTTP_200_OK)
+
+        # 验证通过：创建好友申请
         friend_id = serializer.validated_data["friend_id"]
         friend = User.objects.get(id=friend_id)
-
-        # 创建好友申请（待审核）
         Friend.objects.create(
             user=request.user,
             friend=friend,
             is_approved=False
         )
 
+        # 成功：返回统一格式（code=200）
         return Response(
-            {"message": "好友申请发送成功，等待对方审核"},
-            status=status.HTTP_201_CREATED
+            {
+                "code": 200,
+                "message": "好友申请发送成功，等待对方审核",
+                "data": {"friend_id": friend_id}  # 携带被申请人ID
+            },
+            status=status.HTTP_200_OK
         )
-
-
 class MyFriendRequestsView(generics.ListAPIView):
     """获取我收到的好友申请（GET）"""
     authentication_classes = [JWTAuthentication]
@@ -407,6 +432,30 @@ class MyFriendRequestsView(generics.ListAPIView):
             is_approved=False
         ).order_by("-created_at")
 
+    def list(self, request, *args, **kwargs):
+        """重写list方法，添加code编码"""
+        try:
+            queryset = self.get_queryset()
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(
+                {
+                    "code": 200,  # 成功编码
+                    "message": "获取好友申请列表成功",
+                    "data": serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            # 服务器内部错误
+            return Response(
+                {
+                    "code": 500,
+                    "message": f"获取好友申请列表失败：{str(e)}",
+                    "data": []
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 
 class HandleFriendRequestView(generics.CreateAPIView):
     """处理好友申请（同意/拒绝）（POST）"""
@@ -415,24 +464,57 @@ class HandleFriendRequestView(generics.CreateAPIView):
     serializer_class = HandleFriendRequestSerializer
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        """重写create方法，添加code编码"""
+        try:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)  # 验证失败会抛400异常
 
-        request_id = serializer.validated_data["request_id"]
-        agree = serializer.validated_data["agree"]
+            request_id = serializer.validated_data["request_id"]
+            agree = serializer.validated_data["agree"]
 
-        friend_request = Friend.objects.get(id=request_id, friend=request.user)
+            # 查找申请记录（不存在则抛404）
+            try:
+                friend_request = Friend.objects.get(id=request_id, friend=request.user)
+            except Friend.DoesNotExist:
+                return Response(
+                    {
+                        "code": 404,
+                        "message": "好友申请不存在或不属于当前用户"
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
-        if agree:
-            # 同意：更新为已通过
-            friend_request.is_approved = True
-            friend_request.save()
-            return Response({"message": "已同意好友申请，现在可以聊天啦！"})
-        else:
-            # 拒绝：删除申请记录
-            friend_request.delete()
-            return Response({"message": "已拒绝好友申请"})
+            if agree:
+                # 同意：更新为已通过
+                friend_request.is_approved = True
+                friend_request.save()
+                return Response(
+                    {
+                        "code": 200,
+                        "message": "已同意好友申请，现在可以聊天啦！"
+                    },
+                    status=status.HTTP_200_OK
+                )
+            else:
+                # 拒绝：删除申请记录
+                friend_request.delete()
+                return Response(
+                    {
+                        "code": 200,
+                        "message": "已拒绝好友申请"
+                    },
+                    status=status.HTTP_200_OK
+                )
 
+        except Exception as e:
+            # 服务器内部错误
+            return Response(
+                {
+                    "code": 500,
+                    "message": f"处理好友申请失败：{str(e)}"
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 class CancelFriendRequestView(generics.DestroyAPIView):
     """取消我发送的好友申请（DELETE）"""
@@ -513,4 +595,63 @@ class UserPublicDetailView(generics.RetrieveAPIView):
                 "message": f"查询失败：{str(e)}",
                 "data": None
             }, status=status.HTTP_404_NOT_FOUND)
+
+# views.py（心跳视图）
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
+
+# chat/views.py
+
+class HeartbeatView(APIView):
+    """处理心跳请求，更新用户在线状态和最后活跃时间"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            user = request.user
+            user.is_online = True  # 标记为在线
+            user.save(update_fields=["is_online", "last_active"])  # auto_now=True自动更新last_active
+            return Response({"code": 200, "message": "心跳成功"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"code": 500, "message": f"心跳失败：{str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+# chat/views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from .models import User  # 假设好友申请模型为FriendRequest
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.permissions import IsAuthenticated
+from .models import Friend  # 导入Friend模型（核心！）
+
+
+class PendingRequestCountView(APIView):
+    """查询当前用户的未读好友申请数"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # 核心修正：
+            # 1. 用Friend模型查询（而非User模型）
+            # 2. friend=request.user 表示「当前用户是被申请人」
+            # 3. is_approved=False 表示「未审核的申请」
+            pending_count = Friend.objects.filter(
+                friend=request.user,  # 当前用户是被申请人（收到申请）
+                is_approved=False  # 未通过审核的申请（未处理）
+            ).count()
+
+            return Response({"count": pending_count}, status=status.HTTP_200_OK)
+        except Exception as e:
+            # 更友好的错误提示，便于调试
+            return Response(
+                {"error": f"查询未处理好友申请数失败：{str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 

@@ -5,7 +5,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import (
     FriendListView, ChatMessageView, SendMessageView,
     MarkAsReadView, UnreadCountView, SendFriendRequestView, MyFriendRequestsView, HandleFriendRequestView,
-    CancelFriendRequestView, DeleteFriendView, UserPublicDetailView
+    CancelFriendRequestView, DeleteFriendView, UserPublicDetailView, HeartbeatView, PendingRequestCountView
 )
 
 urlpatterns = [
@@ -22,6 +22,9 @@ urlpatterns = [
     path("friend-request/cancel/<int:friend_id>/", CancelFriendRequestView.as_view(), name="cancel-friend-request"),  # 取消申请
     path("friend/delete/<int:friend_id>/", DeleteFriendView.as_view(), name="delete-friend"),  # 删除好友
     path('users/<int:id>/', UserPublicDetailView.as_view(), name='user-public-detail'),
+    path('chat/heartbeat/', HeartbeatView.as_view(), name='heartbeat'),
+    path('chat/pending-request-count/', PendingRequestCountView.as_view(), name='pending-request-count'),
 ]
+
 
 urlpatterns = format_suffix_patterns(urlpatterns)
